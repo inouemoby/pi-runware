@@ -1,0 +1,48 @@
+{
+  "name": "pi-runware",
+  "version": "0.1.0",
+  "description": "Generic Runware inference, model discovery, and task inspection tools for Pi.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "runware",
+    "image",
+    "video",
+    "audio",
+    "3d",
+    "model-discovery"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/inouemoby/pi-runware.git"
+  },
+  "bugs": {
+    "url": "https://github.com/inouemoby/pi-runware/issues"
+  },
+  "homepage": "https://github.com/inouemoby/pi-runware",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^22.15.3",
+    "typebox": "^1.0.86",
+    "typescript": "^5.9.0"
+  }
+}
