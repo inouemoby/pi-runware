@@ -24,6 +24,8 @@ const DEFAULT_MAX_EMBEDDED_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_EMBEDDED_IMAGES = 4;
 const MAX_OUTPUT_TEXT_BYTES = 48_000;
 
+const SCHEMAS_BASE_URL = "https://schemas.runware.ai";
+
 const MIME_TYPES: Record<string, string> = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -595,6 +597,50 @@ async function formatInferenceResult(
 	return { content: [{ type: "text", text }, ...embedded.images], details };
 }
 
+async function fetchModelSchema(air: string, signal?: AbortSignal): Promise<{ requestSchema?: AnyRecord; responseSchema?: AnyRecord; documentation?: string } | null> {
+	const url = `${SCHEMAS_BASE_URL}/resolve/${encodeURIComponent(air.trim())}`;
+	try {
+		const response = await fetch(url, { signal });
+		if (!response.ok) return null;
+		const data = await response.json() as { requestSchema?: AnyRecord; responseSchema?: AnyRecord; documentation?: string };
+		return data;
+	} catch {
+		return null;
+	}
+}
+
+function simplifySchemaProperty(key: string, property: unknown, requiredSet: Set<string>): AnyRecord {
+	if (!isRecord(property)) return { required: requiredSet.has(key) };
+	const result: AnyRecord = { required: requiredSet.has(key) };
+	if (typeof property.type === "string") result.type = property.type;
+	if (typeof property.description === "string") result.description = property.description;
+	if (property.default !== undefined) result.default = property.default;
+	if (typeof property.minimum === "number") result.min = property.minimum;
+	if (typeof property.maximum === "number") result.max = property.maximum;
+	if (typeof property.minItems === "number") result.minItems = property.minItems;
+	if (typeof property.maxItems === "number") result.maxItems = property.maxItems;
+	if (Array.isArray(property.enum)) result.allowedValues = property.enum;
+	if (isRecord(property.properties)) {
+		const subRequired = new Set(Array.isArray(property.required) ? property.required.filter((k): k is string => typeof k === "string") : []);
+		const subProps: AnyRecord = {};
+		for (const [subKey, subVal] of Object.entries(property.properties)) {
+			subProps[subKey] = simplifySchemaProperty(subKey, subVal, subRequired);
+		}
+		result.properties = subProps;
+	}
+	return result;
+}
+
+function parseModelParameters(schema?: AnyRecord): AnyRecord | undefined {
+	if (!schema || !isRecord(schema.properties)) return undefined;
+	const requiredSet = new Set(Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === "string") : []);
+	const parsed: AnyRecord = {};
+	for (const [key, prop] of Object.entries(schema.properties)) {
+		parsed[key] = simplifySchemaProperty(key, prop, requiredSet);
+	}
+	return parsed;
+}
+
 function modelSearchResults(response: RunwareEnvelope): AnyRecord[] {
 	const results: AnyRecord[] = [];
 	for (const item of response.data ?? []) {
@@ -663,6 +709,20 @@ export default function piRunware(pi: ExtensionAPI): void {
 			};
 			const response = await runwareRequest([task], ctx, signal, DEFAULT_TIMEOUT_SECONDS);
 			const results = modelSearchResults(response);
+			let schemaInfo: { documentation?: string; parameters?: AnyRecord; rawSchema?: AnyRecord } | undefined;
+			if (action === "inspect") {
+				const targetAir = (params.model ?? (results[0] && typeof results[0].air === "string" ? results[0].air : query))?.trim();
+				if (targetAir) {
+					const schemaData = await fetchModelSchema(targetAir, signal);
+					if (schemaData) {
+						schemaInfo = {
+							documentation: schemaData.documentation,
+							parameters: parseModelParameters(schemaData.requestSchema),
+							...(params.includeRaw ? { rawSchema: schemaData.requestSchema } : {}),
+						};
+					}
+				}
+			}
 			const displayResults = params.includeRaw
 				? results
 				: results.map((result) => ({
@@ -683,6 +743,7 @@ export default function piRunware(pi: ExtensionAPI): void {
 				query: query ?? "",
 				count: results.length,
 				totalResults,
+				schema: schemaInfo,
 				response,
 			};
 			return {
@@ -693,6 +754,7 @@ export default function piRunware(pi: ExtensionAPI): void {
 						query: query ?? "",
 						count: results.length,
 						totalResults,
+						schema: schemaInfo,
 						results: displayResults,
 						errors: response.errors ?? [],
 					}),
