@@ -58,7 +58,8 @@ description: Runware 统一任务调用与模型筛选工具说明。包含 runw
 - `action`：`search` 或 `inspect`。
 - `query`：模型查询词。
 - `model`：用于确认的模型或 AIR 标识符。
-- `source`、`category`、`architecture`、`capabilities`、`visibility`：筛选字段。
+- `source`：来源筛选（`curated` 官方、`community` 社区、`merged` 全部合并）。
+- `category`、`architecture`、`capabilities`、`visibility`：筛选字段。
 - `limit`、`offset`、`sort`：分页和排序字段。
 - `filters`：任意额外 Model Search 字段。
 - `includeRaw`：是否返回完整原始模型记录。
