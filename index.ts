@@ -376,7 +376,14 @@ function errorText(response: RunwareEnvelope): string {
 
 function isModerationFieldError(response: RunwareEnvelope): boolean {
 	if (!responseHasOnlyErrors(response)) return false;
-	return /moderation|safety|checkcontent|safetytolerance/.test(errorText(response));
+	return (response.errors ?? []).some((error) => {
+		const code = String(error.code ?? "").toLowerCase();
+		if (code === "invalidprovidercontent" || code === "contentpolicyviolation") return false;
+		const param = String(error.parameter ?? "").toLowerCase();
+		const msg = String(error.message ?? "").toLowerCase();
+		return /moderation|safety|checkcontent/.test(param) ||
+			(/parameter|unsupported|invalid value/i.test(msg) && /moderation|safety|checkcontent/.test(msg));
+	});
 }
 
 function cloneForRetry(tasks: AnyRecord[]): AnyRecord[] {
