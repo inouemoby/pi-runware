@@ -28,6 +28,7 @@
 - `source`：HTTP(S) URL、数据 URI、Runware UUID 或本地文件路径。
 - `mimeType`：可选 MIME 类型。
 - `role`：目标为消息数组时的可选角色。
+- `append`：强制将内容作为目标数组字段的一项追加。
 
 带 `field` 的内容块会追加到对应任务字段；未带 `field` 的内容块保留在任务的 `content` 数组中。本地文件会转换为数据 URI；URL、数据 URI 和 Runware UUID 原样发送。
 

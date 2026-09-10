@@ -61,6 +61,7 @@ const contentBlockSchema = Type.Object({
 	source: Type.Optional(Type.String({ description: "URL, data URI, Runware UUID, or local file path." })),
 	mimeType: Type.Optional(Type.String({ description: "Optional MIME type." })),
 	role: Type.Optional(Type.String({ description: "Optional message role." })),
+	append: Type.Optional(Type.Boolean({ description: "Force this content value to append as an array item." })),
 }, { additionalProperties: true });
 
 const runwareInferSchema = Type.Object({
@@ -190,15 +191,17 @@ function deleteAtPath(target: AnyRecord, field: string): void {
 	if (cursor) delete cursor[parts[parts.length - 1]];
 }
 
-function appendAtPath(target: AnyRecord, field: string, value: unknown): void {
+function appendAtPath(target: AnyRecord, field: string, value: unknown, forceArray = false): void {
 	const parts = field.split(".").map((part) => part.trim()).filter(Boolean);
 	if (parts.length === 0) throw new Error("content.field cannot be empty.");
 	const parent = recordAtPath(target, parts.slice(0, -1));
 	const last = parts[parts.length - 1];
 	const existing = parent[last];
-	if (existing === undefined) parent[last] = value;
+	const inferredArray = /(?:images?|videos?|audios?|files?|messages?|references?|frames?|elements?|items?)$/i.test(last);
+	const asArray = forceArray || inferredArray;
+	if (existing === undefined) parent[last] = asArray ? [value] : value;
 	else if (Array.isArray(existing)) existing.push(value);
-	else if (typeof existing === "string" && typeof value === "string" && /(prompt|text|instruction)$/i.test(last)) {
+	else if (!asArray && typeof existing === "string" && typeof value === "string" && /(prompt|text|instruction)$/i.test(last)) {
 		parent[last] = `${existing}\n${value}`;
 	} else parent[last] = [existing, value];
 }
@@ -232,7 +235,7 @@ async function applyContent(task: AnyRecord, content: RunwareContentBlock[] | un
 	for (const block of content ?? []) {
 		const source = block.source ? await sourceToRunwareValue(block.source, cwd, block.mimeType) : undefined;
 		if (block.field) {
-			appendAtPath(task, block.field, await valueForContentField(block, cwd));
+			appendAtPath(task, block.field, await valueForContentField(block, cwd), block.append ?? false);
 			continue;
 		}
 		const stored: AnyRecord = { type: block.type };
@@ -240,6 +243,7 @@ async function applyContent(task: AnyRecord, content: RunwareContentBlock[] | un
 		if (block.text !== undefined) stored.text = block.text;
 		if (source !== undefined) stored.source = source;
 		if (block.mimeType !== undefined) stored.mimeType = block.mimeType;
+		if (block.append !== undefined) stored.append = block.append;
 		if (block.value !== undefined) stored.value = block.value;
 		if (task.content === undefined) task.content = [stored];
 		else if (Array.isArray(task.content)) (task.content as unknown[]).push(stored);
