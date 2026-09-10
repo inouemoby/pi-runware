@@ -1,3 +1,8 @@
+---
+name: runware
+description: Runware 统一任务调用与模型筛选工具说明。包含 runware_infer 与 runware_models 的参数规范与接口信息。
+---
+
 # Runware
 
 使用 `runware_infer` 调用 Runware 的统一任务 API，使用 `runware_models` 搜索、筛选和确认模型。Runware Provider 仅用于 `/login runware` 保存 API Key，不提供 Pi 聊天模型，也没有插件命令。
