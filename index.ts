@@ -215,7 +215,9 @@ function appendAtPath(target: AnyRecord, field: string, value: unknown, forceArr
 	const parent = recordAtPath(target, parts.slice(0, -1));
 	const last = parts[parts.length - 1];
 	const existing = parent[last];
-	const inferredArray = /(?:images?|videos?|audios?|files?|messages?|references?|frames?|elements?|items?)$/i.test(last);
+	// Only plural collection fields append as arrays. A singular field such as
+	// inputImage or inputs.image must remain a single data URI / UUID string.
+	const inferredArray = /(?:images|videos|audios|files|messages|references|frames|elements|items)$/i.test(last);
 	const asArray = forceArray || inferredArray;
 	if (existing === undefined) parent[last] = asArray ? [value] : value;
 	else if (Array.isArray(existing)) existing.push(value);
