@@ -469,11 +469,21 @@ async function runWithModerationFallback(
 	return { response, tasks, warnings };
 }
 
+const TERMINAL_TASK_STATUSES = new Set([
+	"success", "succeeded", "completed", "failed", "error", "cancelled", "canceled", "expired", "deleted",
+]);
+
 function responseIsTerminal(response: RunwareEnvelope): boolean {
 	if (Array.isArray(response.errors) && response.errors.length > 0) return true;
 	const data = response.data ?? [];
 	if (data.length === 0) return false;
-	return data.every((item) => item.status === undefined || item.status !== "processing");
+	return data.every((item) => {
+		const status = typeof item.status === "string" ? item.status.toLowerCase() : undefined;
+		if (status) return TERMINAL_TASK_STATUSES.has(status);
+		// Initial async acknowledgements contain only taskUUID/taskType. They are
+		// not complete until a poll returns an actual output resource.
+		return collectOutputUrls(item).length > 0;
+	});
 }
 
 function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
