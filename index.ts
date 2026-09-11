@@ -393,12 +393,6 @@ function responseHasOnlyErrors(response: RunwareEnvelope): boolean {
 	return (!response.data || response.data.length === 0) && Boolean(response.errors?.length);
 }
 
-function errorText(response: RunwareEnvelope): string {
-	return (response.errors ?? []).map((error) =>
-		`${String(error.parameter ?? "")} ${String(error.code ?? "")} ${String(error.message ?? "")}`.toLowerCase(),
-	).join("\n");
-}
-
 function isModerationFieldError(response: RunwareEnvelope): boolean {
 	if (!responseHasOnlyErrors(response)) return false;
 	return (response.errors ?? []).some((error) => {
@@ -450,10 +444,13 @@ async function runWithModerationFallback(
 		tasks = retried;
 		response = await runwareRequest(tasks, ctx, signal, timeoutSeconds);
 	}
-	if (responseHasOnlyErrors(response) && /checkcontent/.test(errorText(response))) {
+	if (isModerationFieldError(response) && states.some((state) => state.injectedCheckContent)) {
 		const retried = cloneForRetry(tasks);
-		for (const task of retried) deleteAtPath(task, "safety.checkContent");
-		warnings.push("Runware rejected safety.checkContent; retried without that unsupported field.");
+		for (const task of retried) {
+			deleteAtPath(task, "safety.checkContent");
+			if (isRecord(task.safety) && Object.keys(task.safety).length === 0) delete task.safety;
+		}
+		warnings.push("Runware rejected the plugin-injected safety field; retried without it.");
 		tasks = retried;
 		response = await runwareRequest(tasks, ctx, signal, timeoutSeconds);
 	}
