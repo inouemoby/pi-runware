@@ -122,6 +122,8 @@ type ModerationState = {
 	mode: "none" | "low" | "auto";
 	injectedModeration: boolean;
 	injectedCheckContent: boolean;
+	/** True only when the plugin created settings solely for its default moderation field. */
+	autoInjectedSettings: boolean;
 };
 
 function isRecord(value: unknown): value is AnyRecord {
@@ -254,6 +256,8 @@ async function applyContent(task: AnyRecord, content: RunwareContentBlock[] | un
 }
 
 function applyModeration(task: AnyRecord, params: RunwareInferInput): ModerationState {
+	const hadSettings = isRecord(task.settings);
+	const hasExplicitSettingsOverride = Object.keys(params.moderationFields ?? {}).some((field) => field === "settings" || field.startsWith("settings."));
 	const settings = recordAtPath(task, ["settings"]);
 	const safety = recordAtPath(task, ["safety"]);
 	if (params.safety) Object.assign(safety, params.safety);
@@ -275,7 +279,12 @@ function applyModeration(task: AnyRecord, params: RunwareInferInput): Moderation
 	for (const [field, value] of Object.entries(params.moderationFields ?? {})) {
 		setAtPath(task, field, value);
 	}
-	return { mode, injectedModeration, injectedCheckContent };
+	return {
+		mode,
+		injectedModeration,
+		injectedCheckContent,
+		autoInjectedSettings: !hadSettings && params.moderation === undefined && !hasExplicitSettingsOverride,
+	};
 }
 
 function applyCommonTaskFields(task: AnyRecord, params: RunwareInferInput): { task: AnyRecord; moderation: ModerationState } {
@@ -292,7 +301,7 @@ function applyCommonTaskFields(task: AnyRecord, params: RunwareInferInput): { ta
 	if (result.taskUUID === undefined) result.taskUUID = randomUUID();
 	const moderation = typeof result.model === "string" && result.model.trim()
 		? applyModeration(result, params)
-		: { mode: "auto" as const, injectedModeration: false, injectedCheckContent: false };
+		: { mode: "auto" as const, injectedModeration: false, injectedCheckContent: false, autoInjectedSettings: false };
 	return { task: result, moderation };
 }
 
@@ -388,6 +397,16 @@ function isModerationFieldError(response: RunwareEnvelope): boolean {
 	});
 }
 
+function isSettingsReferenceConflict(response: RunwareEnvelope): boolean {
+	if (!responseHasOnlyErrors(response)) return false;
+	return (response.errors ?? []).some((error) => {
+		const fields = [error.parameter1, error.parameter2, error.message]
+			.map((value) => String(value ?? "").toLowerCase())
+			.join(" ");
+		return /settings/.test(fields) && /referenceimages|inputs\.referenceimages/.test(fields);
+	});
+}
+
 function cloneForRetry(tasks: AnyRecord[]): AnyRecord[] {
 	return tasks.map((task) => ({ ...structuredClone(task), taskUUID: randomUUID() }));
 }
@@ -421,6 +440,15 @@ async function runWithModerationFallback(
 		const retried = cloneForRetry(tasks);
 		for (const task of retried) deleteAtPath(task, "safety.checkContent");
 		warnings.push("Runware rejected safety.checkContent; retried without that unsupported field.");
+		tasks = retried;
+		response = await runwareRequest(tasks, ctx, signal, timeoutSeconds);
+	}
+	if (isSettingsReferenceConflict(response) && states.some((state) => state.autoInjectedSettings)) {
+		const retried = cloneForRetry(tasks);
+		for (let index = 0; index < retried.length; index++) {
+			if (states[index]?.autoInjectedSettings) deleteAtPath(retried[index], "settings");
+		}
+		warnings.push("Runware model rejects settings together with referenceImages; retried without the plugin-injected settings object.");
 		tasks = retried;
 		response = await runwareRequest(tasks, ctx, signal, timeoutSeconds);
 	}
