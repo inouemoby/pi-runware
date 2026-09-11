@@ -25,6 +25,10 @@ const MAX_EMBEDDED_IMAGES = 4;
 const MAX_OUTPUT_TEXT_BYTES = 48_000;
 
 const SCHEMAS_BASE_URL = "https://schemas.runware.ai";
+const RUNWARE_DOCS_HOST = "runware.ai";
+const PRICING_CACHE_TTL_MS = 15 * 60_000;
+const MAX_PRICING_LOOKUPS = 20;
+const PRICING_LOOKUP_CONCURRENCY = 4;
 
 const MIME_TYPES: Record<string, string> = {
 	".png": "image/png",
@@ -117,6 +121,16 @@ type RunwareEnvelope = { data?: AnyRecord[]; errors?: AnyRecord[]; [key: string]
 type ToolContent =
 	| { type: "text"; text: string }
 	| { type: "image"; data: string; mimeType: string };
+
+type ModelPricing = {
+	source: string;
+	summary?: string;
+	minimumUsd?: number;
+	rates?: Array<{ configuration: string; usd: number }>;
+};
+
+type PricingCacheEntry = { expiresAt: number; pricing: ModelPricing };
+const pricingCache = new Map<string, PricingCacheEntry>();
 
 type ModerationState = {
 	mode: "none" | "low" | "auto";
@@ -637,6 +651,98 @@ async function fetchModelSchema(air: string, signal?: AbortSignal): Promise<{ re
 	}
 }
 
+function textFromHtml(value: string): string {
+	return value
+		.replace(/<\/(?:p|div|span|dt|dd|h\d|li|section|footer)>/gi, " ")
+		.replace(/<br\s*\/?>/gi, " ")
+		.replace(/<[^>]*>/g, " ")
+		.replace(/&(nbsp|#160);/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;/gi, "\"")
+		.replace(/&#(?:39|x27);/gi, "'")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function usdFromText(value: string): number | undefined {
+	const match = value.match(/\$\s*([\d,]+(?:\.\d+)?)/);
+	if (!match) return undefined;
+	const parsed = Number(match[1].replace(/,/g, ""));
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function costSection(html: string): string | undefined {
+	const match = /<section\b[^>]*\bid=(["'])cost-and-speed\1[^>]*>/i.exec(html);
+	if (!match || match.index === undefined) return undefined;
+	const start = match.index;
+	const next = html.indexOf('<section class="component-SpecsCard"', start + match[0].length);
+	return html.slice(start, next >= 0 ? next : start + 40_000);
+}
+
+function parseOfficialPricing(html: string, source: string): ModelPricing | undefined {
+	const section = costSection(html);
+	if (!section) return undefined;
+	const lede = /<div\b[^>]*\bclass=(["'])[^"']*\blede\b[^"']*\1[^>]*>([\s\S]*?)<\/div>/i.exec(section)?.[2];
+	const summary = lede ? textFromHtml(lede) : undefined;
+	const ratesHtml = /<h4[^>]*>\s*Rates[\s\S]*?<\/h4>\s*<dl[^>]*>([\s\S]*?)<\/dl>/i.exec(section)?.[1];
+	const rates: Array<{ configuration: string; usd: number }> = [];
+	if (ratesHtml) {
+		for (const match of ratesHtml.matchAll(/<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/gi)) {
+			const configuration = textFromHtml(match[1]);
+			const usd = usdFromText(textFromHtml(match[2]));
+			if (configuration && usd !== undefined) rates.push({ configuration, usd });
+		}
+	}
+	const minimumUsd = summary ? usdFromText(summary) : undefined;
+	if (!summary && minimumUsd === undefined && rates.length === 0) return undefined;
+	return {
+		source,
+		...(summary ? { summary } : {}),
+		...(minimumUsd !== undefined ? { minimumUsd } : {}),
+		...(rates.length ? { rates } : {}),
+	};
+}
+
+async function fetchOfficialPricing(documentation: string, signal?: AbortSignal): Promise<ModelPricing | undefined> {
+	try {
+		const url = new URL(documentation);
+		if (url.hostname !== RUNWARE_DOCS_HOST) return undefined;
+		const cached = pricingCache.get(url.href);
+		if (cached && cached.expiresAt > Date.now()) return cached.pricing;
+		const response = await fetch(url, {
+			signal,
+			headers: { Accept: "text/html" },
+		});
+		if (!response.ok) return undefined;
+		const pricing = parseOfficialPricing(await response.text(), url.href);
+		if (pricing) pricingCache.set(url.href, { pricing, expiresAt: Date.now() + PRICING_CACHE_TTL_MS });
+		return pricing;
+	} catch {
+		return undefined;
+	}
+}
+
+async function fetchPricingForModels(results: AnyRecord[], signal?: AbortSignal): Promise<Map<string, ModelPricing>> {
+	const airs = [...new Set(results
+		.map((result) => typeof result.air === "string" ? result.air : undefined)
+		.filter((air): air is string => Boolean(air)))].slice(0, MAX_PRICING_LOOKUPS);
+	const pricing = new Map<string, ModelPricing>();
+	let next = 0;
+	const worker = async () => {
+		while (next < airs.length) {
+			const air = airs[next++];
+			const schema = await fetchModelSchema(air, signal);
+			if (!schema?.documentation) continue;
+			const item = await fetchOfficialPricing(schema.documentation, signal);
+			if (item) pricing.set(air, item);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(PRICING_LOOKUP_CONCURRENCY, airs.length) }, worker));
+	return pricing;
+}
+
 function simplifySchemaProperty(key: string, property: unknown, requiredSet: Set<string>): AnyRecord {
 	if (!isRecord(property)) return { required: requiredSet.has(key) };
 	const result: AnyRecord = { required: requiredSet.has(key) };
@@ -737,34 +843,49 @@ export default function piRunware(pi: ExtensionAPI): void {
 			};
 			const response = await runwareRequest([task], ctx, signal, DEFAULT_TIMEOUT_SECONDS);
 			const results = modelSearchResults(response);
-			let schemaInfo: { documentation?: string; parameters?: AnyRecord; rawSchema?: AnyRecord } | undefined;
+			let schemaInfo: { documentation?: string; parameters?: AnyRecord; rawSchema?: AnyRecord; pricing?: ModelPricing } | undefined;
+			let pricingByAir = new Map<string, ModelPricing>();
 			if (action === "inspect") {
 				const targetAir = (params.model ?? (results[0] && typeof results[0].air === "string" ? results[0].air : query))?.trim();
 				if (targetAir) {
 					const schemaData = await fetchModelSchema(targetAir, signal);
+					const pricing = schemaData?.documentation
+						? await fetchOfficialPricing(schemaData.documentation, signal)
+						: undefined;
+					if (pricing) pricingByAir.set(targetAir, pricing);
 					if (schemaData) {
 						schemaInfo = {
 							documentation: schemaData.documentation,
 							parameters: parseModelParameters(schemaData.requestSchema),
+							...(pricing ? { pricing } : {}),
 							...(params.includeRaw ? { rawSchema: schemaData.requestSchema } : {}),
 						};
 					}
 				}
+			} else {
+				pricingByAir = await fetchPricingForModels(results, signal);
 			}
-			const displayResults = params.includeRaw
-				? results
-				: results.map((result) => ({
-					name: result.name,
-					air: result.air,
-					category: result.category,
-					architecture: result.architecture,
-					capabilities: result.capabilities,
-					source: result.source,
-					provider: result.provider,
-					private: result.private,
-					shortDescription: result.shortDescription,
-				}));
+			const displayResults = results.map((result) => {
+				const price = typeof result.air === "string" ? pricingByAir.get(result.air) : undefined;
+				const base = params.includeRaw
+					? { ...result }
+					: {
+						name: result.name,
+						air: result.air,
+						category: result.category,
+						architecture: result.architecture,
+						capabilities: result.capabilities,
+						source: result.source,
+						provider: result.provider,
+						private: result.private,
+						shortDescription: result.shortDescription,
+					};
+				return { ...base, ...(price ? { pricing: price } : {}) };
+			});
 			const totalResults = (response.data ?? []).find((item) => typeof item.totalResults === "number")?.totalResults;
+			const pricingNotice = action === "search" && results.length > MAX_PRICING_LOOKUPS
+				? `Official pricing was fetched for the first ${MAX_PRICING_LOOKUPS} returned models.`
+				: undefined;
 			const details: AnyRecord = {
 				service: "runware-model-search",
 				action,
@@ -772,6 +893,7 @@ export default function piRunware(pi: ExtensionAPI): void {
 				count: results.length,
 				totalResults,
 				schema: schemaInfo,
+				...(pricingNotice ? { pricingNotice } : {}),
 				response,
 			};
 			return {
@@ -784,6 +906,7 @@ export default function piRunware(pi: ExtensionAPI): void {
 						totalResults,
 						schema: schemaInfo,
 						results: displayResults,
+						...(pricingNotice ? { pricingNotice } : {}),
 						errors: response.errors ?? [],
 					}),
 				}],

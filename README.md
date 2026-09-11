@@ -7,7 +7,7 @@ The package registers an auth-only `runware` provider with an empty model list s
 It exposes exactly two tools:
 
 - `runware_infer` — call any Runware task type or model with arbitrary task fields and free-form content blocks.
-- `runware_models` — search, filter, and inspect models through Runware Model Search.
+- `runware_models` — search, filter, and inspect models through Runware Model Search, including current official documentation pricing when Runware publishes it.
 
 Standard tool usage and parameter information are supplied by the bundled `runware` skill.
 
